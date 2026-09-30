@@ -2,7 +2,8 @@ import { config } from "../config.js";
 import { query } from "../db.js";
 import { embedTexts, isEmbeddingConfigured } from "./ai.js";
 import { displayFilename } from "./filename.js";
-import { isVectorStoreConfigured, searchVectors } from "./vectorStore.js";
+import { isVectorStoreConfigured } from "./vectorStore.js";
+import { retrieveWithLangChain } from "./lc/retriever.js";
 
 export interface SearchResult {
   chunkId: string;
@@ -202,10 +203,28 @@ export async function searchKnowledge(
     }
   }
 
-  if (isEmbeddingConfigured()) {
-    const questionVector = await embedTexts([question]).catch(() => null);
-    if (questionVector?.[0]) {
-      const vectorHits = await searchVectors(questionVector[0], ownerId, candidateLimit, undefined, documentIds).catch(() => []);
+  let questionVector: number[] | null = null;
+  let vectorHits: any[] = [];
+  if (useVectorStore && isEmbeddingConfigured()) {
+    const documents = await retrieveWithLangChain(question, { ownerId, limit: candidateLimit, documentIds }).catch(() => null);
+    vectorHits = (documents ?? []).map((document: any) => ({
+      chunkId: String(document.id ?? document.metadata?.chunkId ?? ""),
+      score: Number(document.metadata?.score ?? 0),
+      payload: {
+        ownerId: String(document.metadata?.ownerId ?? ownerId),
+        documentId: String(document.metadata?.documentId ?? ""),
+        documentName: document.metadata?.documentName ?? "未知文档",
+        fileExtension: document.metadata?.fileExtension ?? null,
+        content: document.pageContent ?? "",
+        pageNo: document.metadata?.pageNo ?? null,
+        sectionTitle: document.metadata?.sectionTitle ?? null,
+      },
+    }));
+  } else if (isEmbeddingConfigured()) {
+    const embedding = await embedTexts([question]).catch(() => null);
+    questionVector = embedding?.[0] ?? null;
+  }
+  if (vectorHits.length) {
       const hitDocumentIds = [...new Set(vectorHits.map((hit) => hit.payload.documentId).filter(Boolean))];
       const canonicalRows = hitDocumentIds.length ? await query<any>(
         `SELECT document_id, original_file_name, file_extension FROM documents
@@ -236,22 +255,22 @@ export async function searchKnowledge(
           keywordScore: existing?.keywordScore ?? terms.reduce((total, term) => total + (lower.includes(term) ? 1 : 0), 0),
         });
       }
-      if (!useVectorStore) {
-        for (const candidate of candidates.values()) {
-          if (candidate.semanticScore > 0) continue;
-          let vector: number[] | null = null;
-          try {
-            vector = Array.isArray(candidate.row.embedding_json)
-              ? candidate.row.embedding_json
-              : candidate.row.embedding_json
-                ? JSON.parse(candidate.row.embedding_json)
-                : null;
-          } catch {
-            vector = null;
-          }
-          if (vector) candidate.semanticScore = cosine(questionVector[0], vector);
-        }
+    }
+
+  if (!useVectorStore && questionVector) {
+    for (const candidate of candidates.values()) {
+      if (candidate.semanticScore > 0) continue;
+      let vector: number[] | null = null;
+      try {
+        vector = Array.isArray(candidate.row.embedding_json)
+          ? candidate.row.embedding_json
+          : candidate.row.embedding_json
+            ? JSON.parse(candidate.row.embedding_json)
+            : null;
+      } catch {
+        vector = null;
       }
+      if (vector) candidate.semanticScore = cosine(questionVector, vector);
     }
   }
 

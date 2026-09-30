@@ -24,7 +24,7 @@ Folio 是一个个人知识库：把散落的资料（PDF / Word / Markdown / TX
 ## 技术栈
 
 - 前端：React、TypeScript、Vite、Tailwind CSS、lucide-react、react-markdown
-- 后端：Node.js、Express、TypeScript、Zod、mysql2
+- 后端：Node.js、Express、TypeScript、Zod、mysql2；AI 层使用 LangChain.js + LangGraph
 - 数据库：MySQL 8+ / MariaDB
 - 向量库：Qdrant（可选，未启用时用 MySQL JSON 回退）
 - 本地模型：`BAAI/bge-m3`（Embedding）、`BAAI/bge-reranker-v2-m3`（Rerank），纯 CPU
@@ -60,6 +60,10 @@ local_models/      本地 Embedding + Rerank 服务（Python/FastAPI）
    生产模式：`npm run build` 后 `npm run start:prod`（首次）或 `npm start`（重启）。
 
 首次访问进入登录页，默认允许注册。公开部署并创建账户后，建议把 `ALLOW_REGISTRATION=false`，并在 HTTPS 下设置 `SECURE_COOKIES=true`。
+
+### LangChain AI 层
+
+AI 层统一使用 LangChain.js：模型接入采用 `ChatOpenAI`，Embedding 采用 `OpenAIEmbeddings`，向量检索采用 Qdrant VectorStore 与作用域 Retriever，分块采用 `RecursiveCharacterTextSplitter`，Agent 采用 LangGraph 工具图。Folio 自己的作用域、中文词法召回、阈值、引用和 SSE 协议保持在产品层；切换 Embedding 模型后执行 `npm run db:reembed`。
 
 ## 本地模型（Embedding + Rerank）
 

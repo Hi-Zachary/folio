@@ -1,6 +1,7 @@
 import { config } from "../config.js";
 import { query } from "../db.js";
 import { chatCompletion, isChatConfigured } from "./ai.js";
+import { structuredDocumentSummary } from "./lc/prompts.js";
 
 /** Approximate characters folded into one map step before the final reduce. */
 const GROUP_CHARS = 6000;
@@ -80,6 +81,21 @@ export async function generateDocumentSummary(documentId: string, ownerId: strin
     }
     if (!partials.length) throw new Error("摘要生成失败");
     material = partials.join("\n\n");
+  }
+
+  const structured = await structuredDocumentSummary(material).catch(() => null);
+  if (structured?.summary) {
+    const summary = structured.summary.trim().slice(0, 2000);
+    const keyPoints = stringList(structured.keyPoints, 8);
+    const outline = stringList(structured.outline, 10);
+    await query(
+      `UPDATE documents
+       SET ai_summary = ?, ai_summary_key_points = ?, ai_summary_outline = ?,
+           ai_summary_model = ?, ai_summary_at = NOW(), ai_summary_version = content_version
+       WHERE document_id = ? AND owner_id = ? AND content_version = ?`,
+      [summary, JSON.stringify(keyPoints), JSON.stringify(outline), config.ai.chatModel, documentId, ownerId, sourceVersion],
+    );
+    return { status: "ready" as const, summary, keyPoints, outline, modelName: config.ai.chatModel, generatedAt: new Date().toISOString() };
   }
 
   const raw = await chatCompletion([

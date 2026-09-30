@@ -10,6 +10,7 @@ import { deleteDocumentVectors, ensureCollection, isVectorStoreConfigured, upser
 import { displayFilename } from "./filename.js";
 import { ocrAvailable, ocrPdf } from "./ocr.js";
 import { generateDocumentSummary } from "./summary.js";
+import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
 interface ExtractedPage {
   pageNo: number | null;
@@ -67,41 +68,31 @@ function sectionTitleAt(text: string, offset: number) {
   return title;
 }
 
-export function splitPage(page: ExtractedPage, globalOffset: number, maxLength = 1800, overlap = 220): TextChunk[] {
+export async function splitPage(page: ExtractedPage, globalOffset: number, maxLength = 1800, overlap = 220): Promise<TextChunk[]> {
   const text = normalizeText(page.text);
   if (!text) return [];
-  const chunks: TextChunk[] = [];
-  let start = 0;
-
-  while (start < text.length) {
-    let end = Math.min(text.length, start + maxLength);
-    if (end < text.length) {
-      const boundary = Math.max(
-        text.lastIndexOf("\n\n", end),
-        text.lastIndexOf("\n", end),
-        text.lastIndexOf("。", end),
-        text.lastIndexOf(".", end),
-        text.lastIndexOf("！", end),
-        text.lastIndexOf("？", end),
-      );
-      if (boundary > start + Math.floor(maxLength * 0.55)) end = boundary + 1;
-    }
-
-    const content = text.slice(start, end).trim();
-    if (content) {
-      chunks.push({
-        content,
-        pageNo: page.pageNo,
-        sectionTitle: sectionTitleAt(text, start),
-        charStart: globalOffset + start,
-        charEnd: globalOffset + end,
-      });
-    }
-
-    if (end >= text.length) break;
-    start = Math.max(start + 1, end - overlap);
-  }
-  return chunks;
+  const splitter = new RecursiveCharacterTextSplitter({
+    chunkSize: maxLength,
+    chunkOverlap: overlap,
+    keepSeparator: true,
+    separators: ["。", "！", "？", "\n\n", "\n", ".", " ", ""],
+  });
+  const parts = await splitter.splitText(text);
+  let cursor = 0;
+  return parts.map((content) => {
+    const foundAt = text.indexOf(content, cursor);
+    const start = foundAt < 0 ? cursor : foundAt;
+    const charStart = globalOffset + start;
+    const actualStart = start;
+    cursor = Math.max(cursor, actualStart + Math.max(1, content.length - overlap));
+    return {
+      content,
+      pageNo: page.pageNo,
+      sectionTitle: sectionTitleAt(text, actualStart),
+      charStart,
+      charEnd: globalOffset + actualStart + content.length,
+    };
+  });
 }
 
 async function extractPdfPages(filePath: string): Promise<ExtractedPage[]> {
@@ -331,9 +322,10 @@ export async function processDocument(documentId: string, existingParseJobId?: s
       && textLength(pages) < config.ocr.minCharsPerPage * pages.length
       ? `扫描 PDF 仅对前 ${config.ocr.maxPages} 页执行 OCR，后续页面可能缺少文字内容`
       : null;
-    const chunks = pages.flatMap((page, pageIndex) =>
-      splitPage(page, pages.slice(0, pageIndex).reduce((total, item) => total + normalizeText(item.text).length + 1, 0)),
-    );
+    const chunks = (await Promise.all(pages.map((page, pageIndex) => splitPage(
+      page,
+      pages.slice(0, pageIndex).reduce((total, item) => total + normalizeText(item.text).length + 1, 0),
+    )))).flat();
     if (!chunks.length) {
       throw new Error("文件没有提取到可用文本；如果这是扫描版 PDF，请先进行 OCR");
     }

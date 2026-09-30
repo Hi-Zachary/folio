@@ -1,34 +1,10 @@
 import { config } from "../config.js";
-import { chatCompletion } from "./ai.js";
 import type { SearchResult } from "./search.js";
+import { structuredRerankScores } from "./lc/prompts.js";
 
 function clampScore(value: unknown) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : null;
-}
-
-function parseLlmScores(text: string, expected: number): number[] | null {
-  const start = text.indexOf("[");
-  const end = text.lastIndexOf("]");
-  if (start < 0 || end <= start) return null;
-  try {
-    const parsed = JSON.parse(text.slice(start, end + 1)) as unknown;
-    if (!Array.isArray(parsed)) return null;
-    const scores = new Array<number>(expected).fill(0);
-    let seen = false;
-    for (const item of parsed) {
-      if (typeof item !== "object" || item === null) continue;
-      const record = item as Record<string, unknown>;
-      const index = Number(record.index ?? record.i ?? record.id);
-      const raw = clampScore(Number(record.score ?? record.relevance) / 10);
-      if (!Number.isInteger(index) || index < 0 || index >= expected || raw === null) continue;
-      scores[index] = raw;
-      seen = true;
-    }
-    return seen ? scores : null;
-  } catch {
-    return null;
-  }
 }
 
 /** Dedicated cross-encoder rerank endpoint (Cohere/Jina/SiliconFlow/TEI/local shape). */
@@ -65,19 +41,17 @@ async function apiScores(question: string, documents: string[]): Promise<number[
   return seen ? scores : null;
 }
 
-/** Listwise LLM scoring as a portable fallback when no rerank endpoint is configured. */
+/** Structured LangChain scoring as a fallback when no rerank endpoint is configured. */
 async function llmScores(question: string, documents: string[]): Promise<number[] | null> {
-  const model = config.rerank.provider === "llm" && config.rerank.model ? config.rerank.model : config.ai.utilityModel;
-  if (!config.ai.baseUrl || !model) return null;
-  const passages = documents.map((document, index) => `[${index}] ${document.slice(0, 400)}`).join("\n\n");
-  const raw = await chatCompletion([
-    {
-      role: "system",
-      content: "你是检索相关性重排助手。给定问题和若干资料片段，为每段与问题的相关性打分（0-10，10 表示能直接回答，0 表示完全无关）。只输出一个 JSON 数组，元素形如 {\"index\": 序号, \"score\": 分数}，不要输出任何其他文字。",
-    },
-    { role: "user", content: `问题：${question}\n\n资料片段：\n${passages}` },
-  ], model).catch(() => null);
-  return raw ? parseLlmScores(raw, documents.length) : null;
+  const structured = await structuredRerankScores(question, documents).catch(() => null);
+  if (!structured?.length) return null;
+  const scores = new Array<number>(documents.length).fill(0);
+  for (const item of structured) {
+    if (item.index >= 0 && item.index < scores.length) {
+      scores[item.index] = Math.max(0, Math.min(1, item.score / 10));
+    }
+  }
+  return scores;
 }
 
 /**

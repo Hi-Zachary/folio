@@ -11,7 +11,7 @@ import { chatCompletion, chatCompletionStream, configuredModelName, isChatConfig
 import { buildAnswerMessages, buildGeneralAnswerMessages, getRecentHistory, getSessionMemory, rewriteQuery, summarizeIfNeeded } from "./services/conversation.js";
 import { rerankResults } from "./services/rerank.js";
 import { getDocumentSummary, getFreshSummaryText } from "./services/summary.js";
-import { runAgent } from "./services/agent.js";
+import { runLangGraphAgent } from "./services/lc/graphAgent.js";
 import { createSession, currentUser, destroySession, hashPassword, requireAuth, verifyPassword } from "./services/auth.js";
 import { enqueueDocument, enqueueSummary } from "./services/documentProcessor.js";
 import { displayFilename } from "./services/filename.js";
@@ -1606,7 +1606,7 @@ async function gatherEvidence(
       // document summaries); the agent then decides whether more tools are needed.
       const baseline = await retrieveEvidence(userId, question, scope, history);
       if (baseline.stage) callbacks.onStage?.(baseline.stage);
-      const agent = await runAgent({
+      const agent = await runLangGraphAgent({
         userId,
         scope: { restricted: scope.restricted, documentIds: scope.documentIds },
         history: history.map((message) => ({ role: message.role, content: message.content })),
