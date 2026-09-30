@@ -57,6 +57,7 @@ export default function QAPage() {
   const autoFollowRef = useRef(true);
   const pendingSources = useRef<SourceRef[]>([]);
   const initialSessionParam = useRef(new URLSearchParams(window.location.search).get("session"));
+  const initialMessageParam = useRef(new URLSearchParams(window.location.search).get("message"));
 
   function applyStoredScope(session: ChatSession) {
     const params = new URLSearchParams(window.location.search);
@@ -120,6 +121,17 @@ export default function QAPage() {
     });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (loadingHistory || !initialMessageParam.current) return;
+    const target = document.getElementById(`message-${initialMessageParam.current}`);
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.classList.add("ring-2", "ring-brand/40");
+    const timer = window.setTimeout(() => target.classList.remove("ring-2", "ring-brand/40"), 2200);
+    initialMessageParam.current = null;
+    return () => window.clearTimeout(timer);
+  }, [loadingHistory, messages]);
 
   function handleChatScroll() {
     const element = chatScrollRef.current;
@@ -409,7 +421,7 @@ export default function QAPage() {
               <div className="flex h-full items-center justify-center text-sm text-faint">试试提问：这份资料的核心概念是什么？</div>
             ) : (
               messages.map((message) => (
-                <div key={message.id} className={`flex gap-2.5 sm:gap-3 ${message.role === "user" ? "justify-end" : ""}`}>
+                <div id={`message-${message.id}`} key={message.id} className={`rounded-xl transition-shadow ${message.role === "user" ? "flex justify-end gap-2.5 sm:gap-3" : "flex gap-2.5 sm:gap-3"}`}>
                   {message.role === "assistant" && (
                     <div className="flex h-8 w-8 flex-none items-center justify-center rounded-full bg-brand-soft text-brand"><Bot className="h-4 w-4" /></div>
                   )}
@@ -425,6 +437,26 @@ export default function QAPage() {
                     </div>
                     {message.role === "assistant" && message.answerSource === "general" && (
                       <p className="mt-1 text-xs text-warn">以下内容基于通用知识，不是来自你的资料库。</p>
+                    )}
+                    {message.role === "assistant" && message.answerSource === "fallback" && (
+                      <p className="mt-1 text-xs text-warn">本轮没有找到可用的资料依据。</p>
+                    )}
+                    {message.role === "assistant" && message.answerSource === "document" && !message.sources?.length && (
+                      <p className="mt-1 text-xs text-faint">答案使用了知识库信息，但本轮没有可点击的原文片段。</p>
+                    )}
+                    {message.role === "assistant" && Boolean(message.sources?.length) && !message.id.startsWith("stream-") && !message.id.startsWith("regen-") && (
+                      <details className="mt-2 rounded-lg border border-line bg-card px-3 py-2 text-xs text-muted">
+                        <summary className="cursor-pointer select-none font-medium text-brand-dark">本轮依据 · {message.sources!.length} 个来源</summary>
+                        <div className="mt-2 space-y-1.5">
+                          {message.sources!.map((source, index) => (
+                            <button key={`${source.docId}-${index}`} onClick={() => openCitation(message, index + 1)} className="block w-full rounded-md px-2 py-1.5 text-left hover:bg-paper">
+                              <span className="font-medium text-ink">[{index + 1}] {source.docName}</span>
+                              {source.pageNo && <span className="ml-1 text-faint">· 第 {source.pageNo} 页</span>}
+                              <span className="mt-0.5 block line-clamp-2 text-faint">{source.snippet}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </details>
                     )}
 
                     {message.role === "assistant" && !message.id.startsWith("stream-") && !message.id.startsWith("regen-") && (

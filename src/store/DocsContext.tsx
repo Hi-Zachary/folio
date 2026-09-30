@@ -51,7 +51,8 @@ export function DocsProvider({ children }: { children: ReactNode }) {
   useEffect(() => { void refresh(); }, [refresh]);
 
   useEffect(() => {
-    if (!docs.some((doc) => doc.status === "pending" || doc.status === "parsing")) return;
+    if (!docs.some((doc) => doc.status === "pending" || doc.status === "parsing"
+      || (doc.jobType === "embedding" && (doc.jobStatus === "pending" || doc.jobStatus === "running")))) return;
     const timer = window.setInterval(() => { void refresh(); }, 2500);
     return () => window.clearInterval(timer);
   }, [docs, refresh]);

@@ -1,9 +1,10 @@
 import { NavLink, Outlet } from "react-router-dom";
-import { BookOpenText, FolderKanban, LogOut, MessageCircleQuestion } from "lucide-react";
+import { BookOpenText, FolderKanban, LogOut, MessageCircleQuestion, Search } from "lucide-react";
 import { useAuth } from "../store/AuthContext";
 
 const navItems = [
   { to: "/", label: "资料库", icon: FolderKanban },
+  { to: "/search", label: "搜索", icon: Search },
   { to: "/qa", label: "问答", icon: MessageCircleQuestion },
 ];
 

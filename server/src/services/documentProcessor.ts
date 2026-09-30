@@ -226,8 +226,8 @@ async function finishJob(jobId: string, status: "success" | "failed" | "skipped"
   );
 }
 
-async function indexChunks(documentId: string) {
-  const embeddingJobId = await createJob(documentId, "embedding");
+async function indexChunks(documentId: string, existingJobId?: string) {
+  const embeddingJobId = existingJobId ?? await createJob(documentId, "embedding");
   const rows = await query<any>(
     `SELECT c.chunk_id, c.content, c.page_no, c.section_title, d.owner_id, d.original_file_name, d.file_extension
      FROM document_chunk c INNER JOIN documents d ON d.document_id = c.document_id
@@ -297,6 +297,18 @@ async function indexChunks(documentId: string) {
     await finishJob(embeddingJobId, "failed", error instanceof Error ? error.message : String(error));
     await query(`UPDATE documents SET indexed_at = NOW() WHERE document_id = ?`, [documentId]);
   }
+}
+
+export async function processEmbeddingJob(documentId: string, jobId: string) {
+  const documents = await query<any>(
+    `SELECT document_id FROM documents WHERE document_id = ? AND deleted_at IS NULL AND parse_status = 'parsed'`,
+    [documentId],
+  );
+  if (!documents.length) {
+    await finishJob(jobId, "skipped", "文档已删除或尚未解析完成");
+    return;
+  }
+  await indexChunks(documentId, jobId);
 }
 
 export async function processDocument(documentId: string, existingParseJobId?: string) {

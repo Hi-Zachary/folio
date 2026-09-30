@@ -1,8 +1,11 @@
 import crypto from "node:crypto";
+import { lookup } from "node:dns/promises";
 import fs from "node:fs/promises";
+import { isIP } from "node:net";
 import path from "node:path";
 import { Router } from "express";
 import multer from "multer";
+import { Agent } from "undici";
 import { z } from "zod";
 import { config } from "./config.js";
 import { query, transaction } from "./db.js";
@@ -56,6 +59,7 @@ function publicDocument(row: any) {
     jobType: row.job_type ?? null,
     jobError: row.job_error ?? null,
     jobAttempts: row.job_attempts === null || row.job_attempts === undefined ? null : Number(row.job_attempts),
+    indexFailed: Number(row.embedding_failed_count ?? 0) > 0,
     downloadUrl: `/api/documents/${row.document_id}/file?download=1`,
     previewUrl: `/api/documents/${row.document_id}/file`,
   };
@@ -92,6 +96,13 @@ async function withTags(rows: any[]) {
   ).catch(() => []);
   const byDocumentJob = new Map<string, any>();
   for (const row of jobRows) byDocumentJob.set(String(row.document_id), row);
+  const embeddingRows = await query<any>(
+    `SELECT document_id, SUM(embedding_status = 'failed') AS embedding_failed_count
+     FROM document_chunk WHERE document_id IN (${placeholders}) GROUP BY document_id`,
+    ids,
+  ).catch(() => []);
+  const embeddingFailedByDocument = new Map<string, number>();
+  for (const row of embeddingRows) embeddingFailedByDocument.set(String(row.document_id), Number(row.embedding_failed_count));
   const numbers = ownerIds.length ? await query<any>(
     `SELECT document_id, local_document_no FROM (
        SELECT document_id, ROW_NUMBER() OVER (PARTITION BY owner_id ORDER BY uploaded_at, document_id) AS local_document_no
@@ -102,7 +113,12 @@ async function withTags(rows: any[]) {
   const numberByDocument = new Map<string, number>();
   for (const row of numbers) numberByDocument.set(String(row.document_id), Number(row.local_document_no));
   return rows.map((row) => ({
-    ...publicDocument({ ...row, local_document_no: numberByDocument.get(String(row.document_id)), ...(byDocumentJob.get(String(row.document_id)) ?? {}) }),
+    ...publicDocument({
+      ...row,
+      local_document_no: numberByDocument.get(String(row.document_id)),
+      embedding_failed_count: embeddingFailedByDocument.get(String(row.document_id)) ?? 0,
+      ...(byDocumentJob.get(String(row.document_id)) ?? {}),
+    }),
     tags: byDocument.get(String(row.document_id)) ?? [],
   }));
 }
@@ -142,14 +158,106 @@ function htmlToText(html: string) {
     .trim();
 }
 
-function isPrivateUrl(value: URL) {
-  const host = value.hostname.toLowerCase();
-  if (value.protocol !== "http:" && value.protocol !== "https:") return true;
-  if (host === "localhost" || host === "::1" || host.endsWith(".localhost")) return true;
-  const ipv4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (!ipv4) return false;
-  const [a, b] = ipv4.slice(1, 3).map(Number);
-  return a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+class RequestInputError extends Error {
+  constructor(message: string, readonly statusCode = 400) { super(message); }
+}
+
+function isPublicIp(address: string) {
+  const family = isIP(address);
+  if (family === 4) {
+    const [a, b, c] = address.split(".").map(Number);
+    if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+    if (a === 100 && b >= 64 && b <= 127) return false;
+    if (a === 169 && b === 254) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && (b === 168 || (b === 0 && (c === 0 || c === 2)) || (b === 88 && c === 99))) return false;
+    if (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) return false;
+    if (a === 203 && b === 0 && c === 113) return false;
+    return true;
+  }
+  if (family === 6) {
+    const host = address.toLowerCase();
+    // Only global unicast (2000::/3); reject special ranges and IPv4-mapped IPs.
+    return /^2[0-9a-f]{3}:/.test(host) && !host.startsWith("2001:db8:") && !host.startsWith("2001:0:");
+  }
+  return false;
+}
+
+async function resolvePublicAddresses(value: URL) {
+  if ((value.protocol !== "http:" && value.protocol !== "https:") || value.username || value.password) {
+    throw new RequestInputError("只允许不带凭据的公开 HTTP/HTTPS 页面");
+  }
+  const hostname = value.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")) {
+    throw new RequestInputError("只允许导入公开地址");
+  }
+  const family = isIP(hostname);
+  const addresses = family
+    ? [{ address: hostname, family }]
+    : await lookup(hostname, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some(({ address }) => !isPublicIp(address))) {
+    throw new RequestInputError("只允许导入解析到公网地址的页面");
+  }
+  return addresses;
+}
+
+async function fetchPublicText(startUrl: URL, maxBytes: number) {
+  let currentUrl = startUrl;
+  const signal = AbortSignal.timeout(30_000);
+  for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
+    const addresses = await resolvePublicAddresses(currentUrl);
+    const dispatcher = new Agent({
+      connect: {
+        lookup: ((_hostname: string, options: any, callback: (...args: any[]) => void) => {
+          // Pin DNS to the addresses that were checked above to prevent DNS rebinding.
+          if (options?.all) callback(null, addresses);
+          else callback(null, addresses[0].address, addresses[0].family);
+        }) as any,
+      },
+    });
+    try {
+      const response = await fetch(currentUrl, {
+        redirect: "manual",
+        signal,
+        dispatcher,
+        headers: { "User-Agent": "Folio/1.0 document importer" },
+      } as RequestInit & { dispatcher: Agent });
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get("location");
+        await response.body?.cancel();
+        if (!location) throw new RequestInputError("网页重定向缺少目标地址");
+        if (redirectCount === 5) throw new RequestInputError("网页重定向次数过多");
+        currentUrl = new URL(location, currentUrl);
+        continue;
+      }
+      if (!response.ok) return { ok: false as const, status: response.status, url: currentUrl, contentType: "", text: "" };
+      const contentType = response.headers.get("content-type") ?? "";
+      const declaredLength = Number(response.headers.get("content-length") ?? 0);
+      if (declaredLength > maxBytes) throw new RequestInputError("网页内容超过 2 MB 限制", 413);
+      if (!response.body) return { ok: true as const, status: response.status, url: currentUrl, contentType, text: "" };
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let totalBytes = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          totalBytes += value.byteLength;
+          if (totalBytes > maxBytes) {
+            await reader.cancel();
+            throw new RequestInputError("网页内容超过 2 MB 限制", 413);
+          }
+          chunks.push(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      return { ok: true as const, status: response.status, url: currentUrl, contentType, text: Buffer.concat(chunks).toString("utf8") };
+    } finally {
+      await dispatcher.close();
+    }
+  }
+  throw new RequestInputError("网页重定向次数过多");
 }
 
 async function ownedDocument(documentId: string, ownerId: string) {
@@ -257,6 +365,93 @@ api.post("/auth/logout", async (req, res, next) => {
 });
 
 api.use(requireAuth);
+
+function searchExcerpt(value: string, keyword: string, radius = 180) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  const offset = normalized.toLocaleLowerCase().indexOf(keyword.toLocaleLowerCase());
+  const start = Math.max(0, (offset < 0 ? 0 : offset) - Math.floor(radius / 2));
+  const end = Math.min(normalized.length, start + radius);
+  return `${start ? "…" : ""}${normalized.slice(start, end)}${end < normalized.length ? "…" : ""}`;
+}
+
+api.get("/search", async (req, res, next) => {
+  try {
+    const keyword = z.string().trim().min(1).max(100).parse(req.query.q ?? "");
+    const type = z.enum(["all", "documents", "chunks", "notes", "messages"]).default("all").parse(req.query.type ?? "all");
+    const userId = req.user!.id;
+    const like = `%${keyword.replace(/[\\%_]/g, "\\$&")}%`;
+    const include = (kind: typeof type) => type === "all" || type === kind;
+
+    const [documents, chunks, notes, messages] = await Promise.all([
+      include("documents") ? query<any>(
+        `SELECT d.document_id, d.original_file_name, d.file_extension, d.parse_status, d.uploaded_at,
+                (SELECT GROUP_CONCAT(t.name ORDER BY t.name SEPARATOR '、')
+                 FROM document_tag dt JOIN tag t ON t.tag_id = dt.tag_id WHERE dt.document_id = d.document_id) AS tag_names
+         FROM documents d
+         WHERE d.owner_id = ? AND d.deleted_at IS NULL
+           AND (d.original_file_name LIKE ? OR EXISTS (
+             SELECT 1 FROM document_chunk c WHERE c.document_id = d.document_id AND c.content LIKE ?
+           ) OR EXISTS (
+             SELECT 1 FROM document_note n WHERE n.document_id = d.document_id AND (n.content LIKE ? OR n.quote LIKE ?)
+           ))
+         ORDER BY CASE WHEN d.original_file_name LIKE ? THEN 0 ELSE 1 END, d.uploaded_at DESC, d.document_id DESC
+         LIMIT 8`,
+        [userId, like, like, like, like, like],
+      ) : Promise.resolve([]),
+      include("chunks") ? query<any>(
+        `SELECT c.chunk_id, c.document_id, c.page_no, c.section_title, c.content,
+                d.original_file_name, d.file_extension
+         FROM document_chunk c JOIN documents d ON d.document_id = c.document_id
+         WHERE d.owner_id = ? AND d.deleted_at IS NULL AND d.parse_status = 'parsed' AND c.content LIKE ?
+         ORDER BY c.chunk_id DESC LIMIT 8`,
+        [userId, like],
+      ) : Promise.resolve([]),
+      include("notes") ? query<any>(
+        `SELECT n.note_id, n.document_id, n.quote, n.content, n.updated_at,
+                d.original_file_name, d.file_extension
+         FROM document_note n JOIN documents d ON d.document_id = n.document_id
+         WHERE n.owner_id = ? AND d.owner_id = ? AND d.deleted_at IS NULL
+           AND (n.content LIKE ? OR n.quote LIKE ?)
+         ORDER BY n.updated_at DESC, n.note_id DESC LIMIT 8`,
+        [userId, userId, like, like],
+      ) : Promise.resolve([]),
+      include("messages") ? query<any>(
+        `SELECT m.message_id, m.session_id, m.role, m.content, m.created_at, s.title AS session_title
+         FROM chat_message m JOIN chat_session s ON s.session_id = m.session_id
+         WHERE s.owner_id = ? AND m.role IN ('user', 'assistant') AND m.content LIKE ?
+         ORDER BY m.created_at DESC, m.message_id DESC LIMIT 8`,
+        [userId, like],
+      ) : Promise.resolve([]),
+    ]);
+
+    res.json({
+      documents: documents.map((row: any) => ({
+        id: String(row.document_id), type: "document", documentId: String(row.document_id),
+        title: displayFilename(row.original_file_name),
+        subtitle: `${row.file_extension.toUpperCase().replace(/^\./, "")} · ${row.parse_status === "parsed" ? "已解析" : row.parse_status}`,
+        snippet: row.tag_names ? `标签：${row.tag_names}` : "打开资料查看内容",
+        updatedAt: row.uploaded_at,
+      })),
+      chunks: chunks.map((row: any) => ({
+        id: String(row.chunk_id), type: "chunk", documentId: String(row.document_id), chunkId: String(row.chunk_id),
+        title: displayFilename(row.original_file_name),
+        subtitle: [row.page_no ? `第 ${row.page_no} 页` : null, row.section_title].filter(Boolean).join(" · ") || "正文片段",
+        snippet: searchExcerpt(String(row.content), keyword), updatedAt: null,
+      })),
+      notes: notes.map((row: any) => ({
+        id: String(row.note_id), type: "note", documentId: String(row.document_id),
+        title: `${displayFilename(row.original_file_name)} · 笔记`,
+        subtitle: row.quote ? "摘录笔记" : "文档笔记",
+        snippet: searchExcerpt([row.quote, row.content].filter(Boolean).join(" · "), keyword), updatedAt: row.updated_at,
+      })),
+      messages: messages.map((row: any) => ({
+        id: String(row.message_id), type: "message", messageId: String(row.message_id), sessionId: String(row.session_id),
+        title: row.session_title || "未命名对话", subtitle: row.role === "user" ? "用户提问" : "AI 回答",
+        snippet: searchExcerpt(String(row.content), keyword), updatedAt: row.created_at,
+      })),
+    });
+  } catch (error) { next(error); }
+});
 
 api.get("/documents", async (req, res, next) => {
   try {
@@ -983,23 +1178,18 @@ api.post("/documents/url", async (req, res, next) => {
       title: z.string().trim().max(120).optional(),
     }).parse(req.body);
     const target = new URL(body.url);
-    if (isPrivateUrl(target)) return res.status(400).json({ message: "只允许导入公开的 HTTP/HTTPS 页面" });
-
-    const response = await fetch(target, { redirect: "follow", signal: AbortSignal.timeout(30_000), headers: { "User-Agent": "Folio/1.0 document importer" } });
+    const response = await fetchPublicText(target, 2_000_000);
     if (!response.ok) return res.status(400).json({ message: `网页请求失败（${response.status}）` });
-    if (isPrivateUrl(new URL(response.url))) return res.status(400).json({ message: "网页重定向到了不允许访问的地址" });
-    const contentType = response.headers.get("content-type") ?? "";
+    const contentType = response.contentType;
     if (contentType && !/text\/html|text\/plain|application\/xhtml\+xml/i.test(contentType)) {
       return res.status(415).json({ message: "该地址不是 HTML 或纯文本页面" });
     }
-    const length = Number(response.headers.get("content-length") ?? 0);
-    if (length > 2_000_000) return res.status(413).json({ message: "网页内容超过 2 MB 限制" });
-    const raw = (await response.text()).slice(0, 2_000_000);
+    const raw = response.text;
     const content = /text\/html|xhtml/i.test(contentType) || /<html[\s>]/i.test(raw) ? htmlToText(raw) : raw.trim();
     if (!content) return res.status(400).json({ message: "网页没有可提取的正文" });
     const titleMatch = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-    const title = (body.title || (titleMatch ? htmlToText(titleMatch[1]) : "") || target.hostname).slice(0, 120);
-    const buffer = Buffer.from(`# ${title}\n\n来源：${target.href}\n\n${content}`, "utf8");
+    const title = (body.title || (titleMatch ? htmlToText(titleMatch[1]) : "") || response.url.hostname).slice(0, 120);
+    const buffer = Buffer.from(`# ${title}\n\n来源：${response.url.href}\n\n${content}`, "utf8");
     const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
     const existing = await query<any>("SELECT document_id FROM documents WHERE owner_id = ? AND file_hash = ? LIMIT 1", [userId, fileHash]);
     if (existing.length) return res.status(409).json({ message: "相同网页内容已经导入过了", documentId: String(existing[0].document_id) });
@@ -1205,7 +1395,41 @@ api.post("/documents/:id/retry", async (req, res, next) => {
       [req.params.id, userId],
     );
     if (!rows.length) return res.status(404).json({ message: "文档不存在" });
-    if (rows[0].parse_status !== "failed") return res.status(409).json({ message: "只有解析失败的资料可以重试" });
+    if (rows[0].parse_status === "parsed") {
+      const failedChunks = await query<any>(
+        "SELECT COUNT(*) AS failed_count FROM document_chunk WHERE document_id = ? AND embedding_status = 'failed'",
+        [req.params.id],
+      );
+      if (Number(failedChunks[0]?.failed_count ?? 0) === 0) {
+        return res.status(409).json({ message: "该资料没有失败的索引任务" });
+      }
+      const jobs = await query<any>(
+        "SELECT job_id, status FROM document_job WHERE document_id = ? AND job_type = 'embedding' ORDER BY job_id DESC LIMIT 1",
+        [req.params.id],
+      );
+      if (jobs[0]?.status === "pending" || jobs[0]?.status === "running") {
+        return res.status(409).json({ message: "索引任务已在处理中" });
+      }
+      if (jobs[0]?.status === "failed") {
+        const reset = await query<any>(
+          `UPDATE document_job SET status = 'pending', error_message = NULL, finished_at = NULL,
+                  locked_at = NULL, locked_by = NULL
+           WHERE job_id = ? AND status = 'failed'`,
+          [jobs[0].job_id],
+        );
+        if (!reset.affectedRows) return res.status(409).json({ message: "索引任务状态已变化，请刷新后重试" });
+      } else {
+        await query(
+          `INSERT INTO document_job (document_id, job_type, status, attempt_count)
+           VALUES (?, 'embedding', 'pending', 0)`,
+          [req.params.id],
+        );
+      }
+      const updatedRows = await query<any>("SELECT d.* FROM documents d WHERE d.document_id = ?", [req.params.id]);
+      const [updated] = await withTags(updatedRows);
+      return res.json(updated);
+    }
+    if (rows[0].parse_status !== "failed") return res.status(409).json({ message: "只有解析或索引失败的资料可以重试" });
     await query("UPDATE documents SET parse_status = 'pending', parse_error = NULL WHERE document_id = ?", [req.params.id]);
     await query(
       `UPDATE document_job SET status = 'skipped', finished_at = NOW(), error_message = 'replaced by retry'
@@ -1534,27 +1758,33 @@ async function retrieveEvidence(
     // Document-level sources so the answer's [1][2] map to real, clickable documents.
     const documentParts: string[] = [];
     const documentSources: SearchResult[] = [];
+    let usedPreview = false;
     for (const documentId of scope.documentIds) {
       const firstChunkId = firstChunkById.get(documentId);
       if (!firstChunkId) continue;
       let summary = await getFreshSummaryText(documentId, userId).catch(() => null);
+      let sourceLabel = "文档摘要";
       if (!summary) {
         const previewRows = await query<any>(
           "SELECT content FROM document_chunk WHERE document_id = ? ORDER BY chunk_no LIMIT 3",
           [documentId],
         ).catch(() => []);
-        if (previewRows.length) summary = `正文开头：\n${previewRows.map((row: any) => String(row.content)).join("\n\n").slice(0, 4200)}`;
+        if (previewRows.length) {
+          summary = previewRows.map((row: any) => String(row.content)).join("\n\n").slice(0, 4200);
+          sourceLabel = "正文开头预览（摘要尚未生成）";
+          usedPreview = true;
+        }
       }
       if (!summary) continue;
       const name = nameById.get(documentId) ?? "未命名";
       const index = documentSources.length + 1;
-      documentParts.push(`[${index}] 资料：${name}\n摘要：${summary}`);
+      documentParts.push(`[${index}] 资料：${name}\n${sourceLabel}：\n${summary}`);
       documentSources.push({
         chunkId: firstChunkId,
         documentId,
         documentName: name,
         fileExtension: extensionById.get(documentId) ?? null,
-        snippet: `文档摘要：${summary.slice(0, 300)}`,
+        snippet: `${sourceLabel}：${summary.slice(0, 300)}`,
         pageNo: null,
         sectionTitle: null,
         score: 0,
@@ -1568,7 +1798,10 @@ async function retrieveEvidence(
         .slice(0, config.search.resultLimit)
         .map((item, index) => `[${offset + index + 1}] ${item.documentName}\n${item.context ?? item.snippet}`)
         .join("\n\n");
-      contextText = `以下为所选资料的摘要，用于整体理解与比较：\n\n${documentParts.join("\n\n")}\n\n可参考的原文片段：\n${evidence}`;
+      const description = usedPreview
+        ? "以下为所选资料的文档摘要；摘要尚未生成的资料明确标注为正文开头预览，不代表全文："
+        : "以下为所选资料的文档摘要，用于整体理解与比较：";
+      contextText = `${description}\n\n${documentParts.join("\n\n")}\n\n可参考的原文片段：\n${evidence}`;
       results = [...documentSources, ...results];
     }
   }
@@ -1645,6 +1878,13 @@ function fallbackAnswer(noMatch: boolean, results: SearchResult[]) {
     return "未在知识库中找到与该问题相关的资料，暂无法给出有依据的回答。你可以换一种提问方式，或先上传相关资料。";
   }
   return `检索到 ${results.length} 个相关资料片段。${results[0].snippet}`;
+}
+
+function sanitizeCitations(answer: string, sourceCount: number) {
+  return answer.replace(/\[(\d{1,3})\](?:\([^)]+\))?/g, (_match, digits: string) => {
+    const index = Number(digits);
+    return index >= 1 && index <= sourceCount ? `[${index}]` : "";
+  });
 }
 
 function answerSource(hasContext: boolean, useGeneral: boolean): "document" | "general" | "fallback" {
@@ -1734,7 +1974,7 @@ api.post("/chat/messages", async (req, res, next) => {
     const source = answerSource(hasContext, useGeneral);
     if (!answer.trim() && !evidence.answered && (useResultsForContext || useGeneral)) answer = "模型暂时没有返回内容，请重试。";
     if (!answer.trim()) answer = fallbackAnswer(noMatch, results);
-    if (!results.length) answer = answer.replace(/\s*\[\d{1,2}\]/g, "");
+    answer = sanitizeCitations(answer, results.length);
     const assistantMessage = await query<any>(
       "INSERT INTO chat_message (session_id, role, content, no_match, answer_source, model_name) VALUES (?, 'assistant', ?, ?, ?, ?)",
       [sessionId, answer, noMatch, source, configuredModelName()],
@@ -1829,8 +2069,14 @@ async function streamAnswer(
       answer = fallbackAnswer(noMatch, results);
       send("delta", { text: answer });
     }
-    // No source cards means no valid citation targets: strip any markers the model invented.
-    if (!results.length) answer = answer.replace(/\s*\[\d{1,2}\]/g, "");
+    // Replace already streamed text if the model used a citation outside this
+    // answer's source list so the visible and persisted answers stay identical.
+    const sanitizedAnswer = sanitizeCitations(answer, results.length);
+    if (sanitizedAnswer !== answer) {
+      answer = sanitizedAnswer;
+      send("reset", {});
+      if (answer) send("delta", { text: answer });
+    }
 
     const assistantMessage = await query<any>(
       "INSERT INTO chat_message (session_id, role, content, no_match, answer_source, model_name) VALUES (?, 'assistant', ?, ?, ?, ?)",
@@ -1937,7 +2183,8 @@ api.use((error: unknown, _req: any, res: any, _next: any) => {
   const isMulterError = error instanceof multer.MulterError;
   const mysqlCode = typeof error === "object" && error !== null && "code" in error ? String((error as any).code) : "";
   const isDuplicate = mysqlCode === "ER_DUP_ENTRY";
-  const status = error instanceof z.ZodError ? 400 : isMulterError && error.code === "LIMIT_FILE_SIZE" ? 413 : isMulterError ? 400 : isDuplicate ? 409 : 500;
+  const explicitStatus = typeof error === "object" && error !== null && "statusCode" in error ? Number((error as any).statusCode) : 0;
+  const status = error instanceof z.ZodError ? 400 : isMulterError && error.code === "LIMIT_FILE_SIZE" ? 413 : isMulterError ? 400 : isDuplicate ? 409 : explicitStatus >= 400 && explicitStatus < 500 ? explicitStatus : 500;
   const message = error instanceof z.ZodError
     ? error.issues.map((issue) => issue.message).join("；")
     : isMulterError && error.code === "LIMIT_FILE_SIZE"

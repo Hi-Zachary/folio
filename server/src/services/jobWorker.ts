@@ -1,11 +1,12 @@
 import os from "node:os";
 import { query, transaction } from "../db.js";
 import { cleanupExpiredSessions } from "./auth.js";
-import { processDocument, processSummaryJob } from "./documentProcessor.js";
+import { processDocument, processEmbeddingJob, processSummaryJob } from "./documentProcessor.js";
 
 const workerId = `${os.hostname()}-${process.pid}`;
 let runningParse = false;
 let runningSummary = false;
+let runningEmbedding = false;
 
 async function recoverStaleJobs() {
   await query(
@@ -16,7 +17,7 @@ async function recoverStaleJobs() {
   );
 }
 
-async function claimJob(jobType: "parse" | "summary") {
+async function claimJob(jobType: "parse" | "summary" | "embedding") {
   return transaction(async (connection) => {
     const [rows] = await connection.query<any[]>(
       `SELECT job_id, document_id
@@ -38,19 +39,23 @@ async function claimJob(jobType: "parse" | "summary") {
   });
 }
 
-async function tick(jobType: "parse" | "summary") {
-  if (jobType === "parse" ? runningParse : runningSummary) return;
+async function tick(jobType: "parse" | "summary" | "embedding") {
+  const isRunning = jobType === "parse" ? runningParse : jobType === "summary" ? runningSummary : runningEmbedding;
+  if (isRunning) return;
   if (jobType === "parse") runningParse = true;
-  else runningSummary = true;
+  else if (jobType === "summary") runningSummary = true;
+  else runningEmbedding = true;
   try {
     const job = await claimJob(jobType);
     if (job && jobType === "summary") await processSummaryJob(job.documentId, job.jobId);
+    else if (job && jobType === "embedding") await processEmbeddingJob(job.documentId, job.jobId);
     else if (job) await processDocument(job.documentId, job.jobId);
   } catch (error) {
     console.error(`${jobType} worker error`, error);
   } finally {
     if (jobType === "parse") runningParse = false;
-    else runningSummary = false;
+    else if (jobType === "summary") runningSummary = false;
+    else runningEmbedding = false;
   }
 }
 
@@ -60,9 +65,11 @@ export function startBackgroundWorkers() {
   const timer = setInterval(() => {
     void tick("parse");
     void tick("summary");
+    void tick("embedding");
     void cleanupExpiredSessions().catch(() => undefined);
   }, 1000);
   timer.unref();
   void tick("parse");
   void tick("summary");
+  void tick("embedding");
 }

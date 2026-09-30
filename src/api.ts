@@ -1,4 +1,4 @@
-import type { AuthUser, ChatMessage, ChatScope, ChatSession, Collection, CollectionDetail, DocChunk, DocumentNote, DocumentSummary, DocumentVersion, KnowledgeDoc, RelatedDocument, SourceRef, Tag } from "./types";
+import type { AuthUser, ChatMessage, ChatScope, ChatSession, Collection, CollectionDetail, DocChunk, DocumentNote, DocumentSummary, DocumentVersion, KnowledgeDoc, RelatedDocument, SourceRef, Tag, UnifiedSearchResponse, UnifiedSearchType } from "./types";
 
 const API_URL = (
   import.meta.env.VITE_API_URL?.trim()
@@ -63,6 +63,10 @@ export const api = {
     if (params?.collectionId) search.set("collectionId", params.collectionId);
     const query = search.toString();
     return request<KnowledgeDoc[]>(query ? `/documents?${query}` : "/documents");
+  },
+  search: (q: string, type: UnifiedSearchType = "all") => {
+    const params = new URLSearchParams({ q: q.trim(), type });
+    return request<UnifiedSearchResponse>(`/search?${params.toString()}`);
   },
   createTextDocument: (payload: { title: string; content: string }) =>
     request<KnowledgeDoc>("/documents/text", { method: "POST", body: JSON.stringify(payload) }),

@@ -691,7 +691,7 @@ export default function DocsPage() {
                 <button onClick={() => openTagModal({ mode: "doc", docId: doc.id, initial: (doc.tags ?? []).map((tag) => tag.id) })} className="btn btn-outline px-2.5 py-1.5 text-xs">标签</button>
                 {collectionFilter && !collections.find((item) => item.id === collectionFilter)?.isSmart && <button onClick={() => void removeDocFromProject(doc.id)} className="btn btn-outline px-2.5 py-1.5 text-xs">移出项目</button>}
                 <a href={documentFileUrl(doc.id, true)} className="btn btn-outline px-2.5 py-1.5 text-xs">下载</a>
-                {doc.status === "failed" && <button onClick={() => void handleRetry(doc.id)} className="btn btn-outline px-2.5 py-1.5 text-xs">重试</button>}
+                {(doc.status === "failed" || doc.indexFailed) && <button onClick={() => void handleRetry(doc.id)} className="btn btn-outline px-2.5 py-1.5 text-xs">重试</button>}
                 <button onClick={() => void handleDelete(doc.id)} className="btn btn-outline ml-auto px-2.5 py-1.5 text-xs text-danger">删除</button>
               </div>
             </div>
@@ -745,8 +745,8 @@ export default function DocsPage() {
                       {collectionFilter && !collections.find((item) => item.id === collectionFilter)?.isSmart && <button onClick={() => void removeDocFromProject(doc.id)} className="btn btn-ghost px-2 py-1.5" title="移出项目"><X className="h-4 w-4" /></button>}
                       <a href={documentFileUrl(doc.id)} target="_blank" rel="noreferrer" className="btn btn-ghost px-2 py-1.5" title="预览文件"><ExternalLink className="h-4 w-4" /></a>
                       <a href={documentFileUrl(doc.id, true)} className="btn btn-ghost px-2 py-1.5" title="下载文件"><Download className="h-4 w-4" /></a>
-                      {doc.status === "failed" && (
-                        <button disabled={busyId === doc.id} onClick={() => void handleRetry(doc.id)} className="btn btn-ghost px-2 py-1.5" title="重试解析"><RefreshCw className={`h-4 w-4 ${busyId === doc.id ? "animate-spin" : ""}`} /></button>
+                      {(doc.status === "failed" || doc.indexFailed) && (
+                        <button disabled={busyId === doc.id} onClick={() => void handleRetry(doc.id)} className="btn btn-ghost px-2 py-1.5" title="重试解析或索引"><RefreshCw className={`h-4 w-4 ${busyId === doc.id ? "animate-spin" : ""}`} /></button>
                       )}
                       <button disabled={busyId === doc.id} onClick={() => void handleDelete(doc.id)} className="btn btn-ghost px-2 py-1.5 hover:bg-danger-soft hover:text-danger" title="删除资料"><Trash2 className="h-4 w-4" /></button>
                     </div>

@@ -206,20 +206,27 @@ export async function searchKnowledge(
   let questionVector: number[] | null = null;
   let vectorHits: any[] = [];
   if (useVectorStore && isEmbeddingConfigured()) {
-    const documents = await retrieveWithLangChain(question, { ownerId, limit: candidateLimit, documentIds }).catch(() => null);
-    vectorHits = (documents ?? []).map((document: any) => ({
-      chunkId: String(document.id ?? document.metadata?.chunkId ?? ""),
-      score: Number(document.metadata?.score ?? 0),
-      payload: {
-        ownerId: String(document.metadata?.ownerId ?? ownerId),
-        documentId: String(document.metadata?.documentId ?? ""),
-        documentName: document.metadata?.documentName ?? "未知文档",
-        fileExtension: document.metadata?.fileExtension ?? null,
-        content: document.pageContent ?? "",
-        pageNo: document.metadata?.pageNo ?? null,
-        sectionTitle: document.metadata?.sectionTitle ?? null,
-      },
-    }));
+    try {
+      const documents = await retrieveWithLangChain(question, { ownerId, limit: candidateLimit, documentIds });
+      if (!documents) throw new Error("Qdrant Retriever 未配置");
+      vectorHits = documents.map((document: any) => ({
+        chunkId: String(document.id ?? document.metadata?.chunkId ?? ""),
+        score: Number(document.metadata?.score ?? 0),
+        payload: {
+          ownerId: String(document.metadata?.ownerId ?? ownerId),
+          documentId: String(document.metadata?.documentId ?? ""),
+          documentName: document.metadata?.documentName ?? "未知文档",
+          fileExtension: document.metadata?.fileExtension ?? null,
+          content: document.pageContent ?? "",
+          pageNo: document.metadata?.pageNo ?? null,
+          sectionTitle: document.metadata?.sectionTitle ?? null,
+        },
+      }));
+    } catch (error) {
+      console.warn(`[search] Qdrant unavailable, using MySQL vectors: ${error instanceof Error ? error.message : String(error)}`);
+      const embedding = await embedTexts([question]).catch(() => null);
+      questionVector = embedding?.[0] ?? null;
+    }
   } else if (isEmbeddingConfigured()) {
     const embedding = await embedTexts([question]).catch(() => null);
     questionVector = embedding?.[0] ?? null;
@@ -257,7 +264,30 @@ export async function searchKnowledge(
       }
     }
 
-  if (!useVectorStore && questionVector) {
+  if (useVectorStore && questionVector) {
+    const scopeSql = documentIds?.length ? ` AND c.document_id IN (${documentIds.map(() => "?").join(", ")})` : "";
+    const rows = await query<any>(
+      `SELECT c.chunk_id, c.document_id, d.original_file_name, d.file_extension, c.content, c.page_no, c.section_title,
+              c.embedding_json
+       FROM document_chunk c
+       INNER JOIN documents d ON d.document_id = c.document_id
+       WHERE d.owner_id = ? AND d.parse_status = 'parsed' AND d.deleted_at IS NULL${scopeSql}
+       ORDER BY c.chunk_id DESC LIMIT ?`,
+      documentIds?.length ? [ownerId, ...documentIds, config.maxEmbeddingCandidates] : [ownerId, config.maxEmbeddingCandidates],
+    ).catch(() => []);
+    for (const row of rows) {
+      const key = String(row.chunk_id);
+      const existing = candidates.get(key);
+      candidates.set(key, {
+        row: { ...row, queryText: question },
+        semanticScore: existing?.semanticScore ?? 0,
+        fulltextScore: existing?.fulltextScore ?? 0,
+        keywordScore: existing?.keywordScore ?? terms.reduce((total, term) => total + (String(row.content).toLowerCase().includes(term) ? 1 : 0), 0),
+      });
+    }
+  }
+
+  if (questionVector) {
     for (const candidate of candidates.values()) {
       if (candidate.semanticScore > 0) continue;
       let vector: number[] | null = null;

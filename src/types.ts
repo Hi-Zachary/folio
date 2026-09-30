@@ -81,6 +81,7 @@ export interface KnowledgeDoc {
   jobType?: string | null;
   jobError?: string | null;
   jobAttempts?: number | null;
+  indexFailed?: boolean;
   parsedAt?: string | null;
   indexedAt?: string | null;
   tags?: Tag[];
@@ -91,6 +92,28 @@ export interface KnowledgeDoc {
 export interface RelatedDocument extends KnowledgeDoc {
   score: number;
   snippet: string;
+}
+
+export type UnifiedSearchType = "all" | "documents" | "chunks" | "notes" | "messages";
+
+export interface UnifiedSearchResult {
+  id: string;
+  type: "document" | "chunk" | "note" | "message";
+  title: string;
+  subtitle: string;
+  snippet: string;
+  updatedAt: string | null;
+  documentId?: string;
+  chunkId?: string;
+  messageId?: string;
+  sessionId?: string;
+}
+
+export interface UnifiedSearchResponse {
+  documents: UnifiedSearchResult[];
+  chunks: UnifiedSearchResult[];
+  notes: UnifiedSearchResult[];
+  messages: UnifiedSearchResult[];
 }
 
 export interface DocumentVersion {

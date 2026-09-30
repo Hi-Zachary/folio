@@ -2,6 +2,7 @@ import { Routes, Route } from "react-router-dom";
 import Layout from "./components/Layout";
 import DocsPage from "./pages/DocsPage";
 import QAPage from "./pages/QAPage";
+import SearchPage from "./pages/SearchPage";
 import { DocsProvider } from "./store/DocsContext";
 import AuthPage from "./pages/AuthPage";
 import RequireAuth from "./components/RequireAuth";
@@ -15,6 +16,7 @@ export default function App() {
         <Route path="/register" element={<AuthPage mode="register" />} />
         <Route element={<RequireAuth><DocsProvider><Layout /></DocsProvider></RequireAuth>}>
           <Route path="/" element={<DocsPage />} />
+          <Route path="/search" element={<SearchPage />} />
           <Route path="/qa" element={<QAPage />} />
         </Route>
       </Routes>
