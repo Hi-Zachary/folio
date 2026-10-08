@@ -1,5 +1,20 @@
 # Folio · AutoDL 部署说明
 
+## 一键启动（推荐）
+
+仓库根目录提供 `start.sh` / `stop.sh`，会按顺序拉起 MariaDB、Qdrant、本地 Embedding+Rerank 和 Folio 应用，已监听的端口自动跳过，可重复执行：
+
+```bash
+cp .env.example .env      # 首次：填写 AI_API_KEY / MYSQL_PASSWORD
+./start.sh                # 用 .env 中的 APP_ORIGIN 启动
+./start.sh https://xxxx.seetacloud.com:8443   # 公网映射变化时传入新地址
+./stop.sh                 # 全部停止
+```
+
+进程通过 `nohup` 常驻，脚本结束后仍继续运行；日志在 `data/*.log`。
+
+> 前端走同源 `/api`，因此 **`VITE_API_URL` 必须留空**。公网地址变化只改 `APP_ORIGIN` 即可，无需重新构建。仅当 `dist/`、`dist-server/` 缺失或前端源码改动时才执行 `npm run build`。
+
 ## 直接在 AutoDL 容器内运行
 
 标准 AutoDL 容器内无法运行 Docker，因此本项目不使用容器，直接运行 Node.js + MySQL + Qdrant + 本地模型服务。Embedding 与重排跑本机 CPU，对话模型走 OpenRouter。
