@@ -15,13 +15,13 @@ function reasoningField() {
   return {};
 }
 
-export function getChatModel(model = config.ai.chatModel) {
+export function getChatModel(model = config.ai.chatModel, maxRetries = config.ai.maxRetries) {
   return new ChatOpenAI({
     model,
     apiKey: config.ai.apiKey || "local",
     temperature: 0.2,
     timeout: config.ai.timeoutMs,
-    maxRetries: config.ai.maxRetries,
+    maxRetries,
     configuration: {
       baseURL: config.ai.baseUrl || undefined,
       defaultHeaders: config.ai.baseUrl?.includes("openrouter.ai")
@@ -81,9 +81,9 @@ export function textFromMessage(message: any) {
   return messageContent(message?.content).trim();
 }
 
-export async function lcChatCompletion(messages: unknown[], model = config.ai.chatModel) {
+export async function lcChatCompletion(messages: unknown[], model = config.ai.chatModel, maxRetries = config.ai.maxRetries) {
   if (!config.ai.baseUrl || !model) return null;
-  const response = await getChatModel(model).invoke(toLangChainMessages(messages));
+  const response = await getChatModel(model, maxRetries).invoke(toLangChainMessages(messages));
   return textFromMessage(response);
 }
 

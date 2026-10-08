@@ -15,8 +15,8 @@ export function isEmbeddingConfigured() {
 }
 
 /** LangChain-backed chat entry point used by routes, summaries and memory. */
-export async function chatCompletion(messages: ChatInput[], model = config.ai.chatModel) {
-  return lcChatCompletion(messages, model);
+export async function chatCompletion(messages: ChatInput[], model = config.ai.chatModel, maxRetries = config.ai.maxRetries) {
+  return lcChatCompletion(messages, model, maxRetries);
 }
 
 /** LangChain streaming entry point; route-level SSE mapping stays unchanged. */

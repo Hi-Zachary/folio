@@ -1,11 +1,12 @@
 import os from "node:os";
+import { config } from "../config.js";
 import { query, transaction } from "../db.js";
 import { cleanupExpiredSessions } from "./auth.js";
 import { processDocument, processEmbeddingJob, processSummaryJob } from "./documentProcessor.js";
 
 const workerId = `${os.hostname()}-${process.pid}`;
 let runningParse = false;
-let runningSummary = false;
+let runningSummaries = 0;
 let runningEmbedding = false;
 
 async function recoverStaleJobs() {
@@ -40,10 +41,12 @@ async function claimJob(jobType: "parse" | "summary" | "embedding") {
 }
 
 async function tick(jobType: "parse" | "summary" | "embedding") {
-  const isRunning = jobType === "parse" ? runningParse : jobType === "summary" ? runningSummary : runningEmbedding;
+  const isRunning = jobType === "parse" ? runningParse : jobType === "summary"
+    ? runningSummaries >= config.summary.jobConcurrency
+    : runningEmbedding;
   if (isRunning) return;
   if (jobType === "parse") runningParse = true;
-  else if (jobType === "summary") runningSummary = true;
+  else if (jobType === "summary") runningSummaries += 1;
   else runningEmbedding = true;
   try {
     const job = await claimJob(jobType);
@@ -54,7 +57,7 @@ async function tick(jobType: "parse" | "summary" | "embedding") {
     console.error(`${jobType} worker error`, error);
   } finally {
     if (jobType === "parse") runningParse = false;
-    else if (jobType === "summary") runningSummary = false;
+    else if (jobType === "summary") runningSummaries -= 1;
     else runningEmbedding = false;
   }
 }

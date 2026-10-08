@@ -202,6 +202,25 @@ export async function enqueueSummary(documentId: string) {
   );
 }
 
+export async function enqueueSummaryIfStale(documentId: string) {
+  if (!isChatConfigured()) return;
+  const rows = await query<any>(
+    `SELECT d.document_id,d.content_version,d.ai_summary_pipeline_version,
+            (SELECT status FROM document_job WHERE document_id=d.document_id AND job_type='summary' ORDER BY job_id DESC LIMIT 1) AS latest_status
+     FROM documents d WHERE d.document_id=? AND d.deleted_at IS NULL AND d.parse_status='parsed'`,
+    [documentId],
+  );
+  const row = rows[0];
+  if (!row) return;
+  if (Number(row.ai_summary_pipeline_version ?? 0) >= Number(row.content_version) && row.latest_status !== "failed") return;
+  if (row.latest_status === "pending" || row.latest_status === "running") return;
+  await query(
+    `INSERT INTO document_job (document_id, job_type, status, attempt_count)
+     VALUES (?, 'summary', 'pending', 0)`,
+    [documentId],
+  );
+}
+
 export async function processSummaryJob(documentId: string, jobId: string) {
   const documents = await query<any>(
     `SELECT owner_id FROM documents WHERE document_id = ? AND deleted_at IS NULL AND parse_status = 'parsed'`,
@@ -371,8 +390,11 @@ export async function processDocument(documentId: string, existingParseJobId?: s
       [parseWarning, documentId],
     );
     await finishJob(parseJobId, "success");
-    await indexChunks(documentId);
+    // Start the document-level overview as soon as complete text chunks exist.
+    // It can run in parallel with vector embedding so broad questions don't wait
+    // for the entire Qdrant indexing pass.
     await enqueueSummary(documentId);
+    await indexChunks(documentId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (chunkJobId) await finishJob(chunkJobId, "failed", message).catch(() => undefined);

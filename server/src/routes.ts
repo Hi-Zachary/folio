@@ -1684,6 +1684,11 @@ async function applySessionScope(sessionId: string, snapshot: Record<string, unk
 
 const FULL_DOCUMENT_TASK = /总结|概述|概括|综述|讲(了|的|在讲|的是)?什么|说什么|说的什么|主要内容|内容是什么|介绍|主题|核心|意图|目的|目标|比较|对比|区别|差异|异同/;
 
+function requiresWholeDocumentEvidence(question: string) {
+  return FULL_DOCUMENT_TASK.test(question)
+    || /讲讲|说说|介绍一下|overview|about this (book|document|paper)/i.test(question);
+}
+
 function publicSource(result: SearchResult) {
   return {
     docId: result.chunkId,
@@ -1832,12 +1837,17 @@ async function gatherEvidence(
   const memory = await getSessionMemory(sessionId);
   const history = await getRecentHistory(sessionId, memory.until, messageId);
   const aiReady = Boolean(config.ai.baseUrl && config.ai.chatModel);
+  const broadDocumentRequest = requiresWholeDocumentEvidence(question);
 
   if (aiReady && config.agent.enabled) {
     try {
       // Deterministic retrieval first (also covers scoped summarise/compare via
       // document summaries); the agent then decides whether more tools are needed.
-      const baseline = await retrieveEvidence(userId, question, scope, history);
+      // For broad requests don't bias the Agent with one arbitrary top-k passage;
+      // let it find the named document and request its full-coverage overview.
+      const baseline = broadDocumentRequest
+        ? { results: [] as SearchResult[], contextText: "", stage: null as string | null, hasContext: false }
+        : await retrieveEvidence(userId, question, scope, history);
       if (baseline.stage) callbacks.onStage?.(baseline.stage);
       const agent = await runLangGraphAgent({
         userId,

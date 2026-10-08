@@ -35,10 +35,13 @@ const GraphState = Annotation.Root({
 
 function stage(name: string) {
   const labels: Record<string, string> = {
+    find_documents: "正在查找相关资料…",
     search_chunks: "正在检索资料…",
     list_documents: "正在查看资料目录…",
+    list_tags: "正在查看标签…",
     get_document_status: "正在查询资料状态…",
     get_document: "正在阅读资料…",
+    get_document_overview: "正在整理全文概要…",
     list_collections: "正在查看项目…",
   };
   return labels[name] ?? "正在处理…";
@@ -71,14 +74,19 @@ export async function runLangGraphAgent(params: GraphParams): Promise<AgentResul
   };
 
   const tools = [
-    tool((input) => call("search_chunks", input), {
-      name: "search_chunks",
-      description: "在当前知识库范围检索最相关的资料片段。",
-      schema: z.object({ query: z.string().describe("检索关键词或问句") }),
+    tool((input) => call("find_documents", input), {
+      name: "find_documents",
+      description: "Find document candidates by title, near spelling, tags and an existing document overview. Use when the user names a book or file, including an approximate or misspelled title. If multiple candidates are plausible, ask the user to choose.",
+      schema: z.object({ query: z.string().describe("Document name, book title, alias, or description"), collectionId: z.string().optional() }),
     }),
-    tool(() => call("list_documents", {}), {
+    tool((input) => call("list_documents", input), {
       name: "list_documents",
-      description: "列出当前范围内的资料目录。",
+      description: "List documents in the current accessible scope or a specified project. Filter by tag, status, file type or title; paginate through results when the user asks for a complete list.",
+      schema: z.object({ collectionId: z.string().optional(), tagId: z.string().optional(), type: z.enum(["PDF", "Word", "Markdown", "HTML", "CSV", "TXT"]).optional(), status: z.enum(["pending", "parsing", "parsed", "failed"]).optional(), query: z.string().optional(), page: z.number().int().min(1).optional(), pageSize: z.number().int().min(1).max(50).optional() }),
+    }),
+    tool(() => call("list_tags", {}), {
+      name: "list_tags",
+      description: "List tags in the current accessible scope and the number of associated documents.",
       schema: z.object({}),
     }),
     tool((input) => call("get_document_status", input), {
@@ -88,8 +96,18 @@ export async function runLangGraphAgent(params: GraphParams): Promise<AgentResul
     }),
     tool((input) => call("get_document", input), {
       name: "get_document",
-      description: "读取指定资料的摘要或正文。",
+      description: "Read a bounded excerpt of a document's original text for specific factual questions. Use get_document_overview for whole-document questions.",
       schema: z.object({ documentId: z.string(), mode: z.enum(["summary", "text"]).optional() }),
+    }),
+    tool((input) => call("get_document_overview", input), {
+      name: "get_document_overview",
+      description: "Get a full-coverage hierarchical overview and ordered section summaries mapped to source passages. Use for whole-document summaries, book introductions, themes, or structure. If the overview is not ready, do not substitute the beginning of the text for a full overview.",
+      schema: z.object({ documentId: z.string().optional(), documentNumber: z.string().optional(), sectionPage: z.number().int().min(1).optional(), pageSize: z.number().int().min(1).max(8).optional() }),
+    }),
+    tool((input) => call("search_chunks", input), {
+      name: "search_chunks",
+      description: "Search original passages for concrete evidence. Optionally restrict to candidate document IDs returned by find_documents. Use to verify claims from an overview and provide citations.",
+      schema: z.object({ query: z.string().describe("Search keywords or question"), documentIds: z.array(z.string()).max(50).optional() }),
     }),
     tool(() => call("list_collections", {}), {
       name: "list_collections",

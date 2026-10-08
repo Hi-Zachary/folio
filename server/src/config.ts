@@ -56,12 +56,22 @@ export const config = {
     // Agentic retrieval: let the model choose tools (search / list / read / collections)
     // before answering. Falls back to the one-shot pipeline on any failure.
     enabled: process.env.AGENT_ENABLED !== "false",
-    maxSteps: integer("AGENT_MAX_STEPS", 4),
+    maxSteps: integer("AGENT_MAX_STEPS", 6),
     // Model used to choose/sequence tools; defaults to the chat model (tool choice
     // quality matters more than the small speed gain of a weaker model).
     model: process.env.AGENT_MODEL || process.env.AI_CHAT_MODEL || "",
     // Per agent step timeout: a stalled tool-turn falls back instead of hanging.
     stepTimeoutMs: integer("AGENT_STEP_TIMEOUT_MS", 45_000),
+  },
+  summary: {
+    // The configured DeepSeek V4.1 Flash model supports 1M context. Reserve room
+    // for prompts/output; documents over this budget use map/reduce instead.
+    contextTokens: integer("SUMMARY_CONTEXT_TOKENS", 1_048_576),
+    contextReserveTokens: integer("SUMMARY_CONTEXT_RESERVE_TOKENS", 150_000),
+    groupChars: integer("SUMMARY_GROUP_CHARS", 60_000),
+    sectionChars: integer("SUMMARY_SECTION_CHARS", 120_000),
+    mapConcurrency: integer("SUMMARY_MAP_CONCURRENCY", 6),
+    jobConcurrency: integer("SUMMARY_JOB_CONCURRENCY", 2),
   },
   conversation: {
     // Turns kept verbatim in the prompt; older ones are folded into the summary.
